@@ -7133,6 +7133,60 @@ static RECT initialWebView2Bounds(
     return bounds;
 }
 
+// Resolve the WebView2 remote-debugging port once per process.
+//
+// This must not be resolved per view. WebView2 rejects a second environment
+// created against the same user data folder when its AdditionalBrowserArguments
+// differ, failing controller creation with ERROR_INVALID_STATE (0x8007139F),
+// and views share one user data folder unless they opt into a partition. A dev
+// build resolves its port by scanning for a free one, so a per-view resolve
+// would scan past the port the first view had already bound, pass different
+// arguments, and stop the second view from being created at all.
+//
+// g_remoteDebugPort is deliberately not written here. It belongs to CEF, whose
+// OpenRemoteDevToolsFrontend reads it to reach the CEF DevTools endpoint;
+// overwriting it would aim that lookup at the WebView2 port in an app that
+// renders with both.
+static int webView2RemoteDebuggingPort() {
+    // Function-local static: initialized exactly once, thread-safely, when the
+    // first view is created.
+    static const int port = []() -> int {
+        const std::wstring exePath = electrobun::getModuleFileNameWide();
+        if (exePath.empty()) return 0;
+
+        const std::filesystem::path buildJsonPath =
+            std::filesystem::path(exePath).parent_path() /
+            L".." / L"Resources" / L"build.json";
+        const std::string buildJsonContent =
+            electrobun::readFileToString(buildJsonPath);
+        const electrobun::ChromiumFlagConfig chromiumFlags =
+            electrobun::parseChromiumFlags(buildJsonContent);
+        const auto remoteDebugging = electrobun::resolveRemoteDebugging(
+            buildJsonContent, chromiumFlags,
+            getenv(electrobun::kRemoteDebuggingPortEnvironment));
+        const int selectedPort = electrobun::selectRemoteDebuggingPort(
+            remoteDebugging, IsPortAvailable);
+
+        if (selectedPort != 0) {
+            std::cout << "[WebView2] Remote debugging enabled on 127.0.0.1:"
+                      << selectedPort << " ("
+                      << electrobun::remoteDebuggingSourceName(remoteDebugging.source)
+                      << ")" << std::endl;
+        } else if (remoteDebugging.enabled()) {
+            std::cout << "[WebView2] Remote debugging disabled: no free port in "
+                      << electrobun::kDefaultRemoteDebuggingPort << "-"
+                      << electrobun::kLastAutomaticRemoteDebuggingPort << std::endl;
+        } else if (remoteDebugging.source == electrobun::RemoteDebuggingSource::invalid_configuration ||
+                   remoteDebugging.source == electrobun::RemoteDebuggingSource::invalid_environment) {
+            std::cout << "[WebView2] Remote debugging disabled: "
+                      << electrobun::remoteDebuggingSourceName(remoteDebugging.source)
+                      << std::endl;
+        }
+        return selectedPort;
+    }();
+    return port;
+}
+
 // Internal factory method for creating WebView2 instances
 static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                                  HWND hwnd,
@@ -7952,32 +8006,12 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
             // Resolve the remote-debugging port from the same sources as the CEF
             // renderer (build.json chromiumFlags["remote-debugging-port"], the
             // ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT env var, or the dev-build default)
-            // and pass it through the API so it survives elevation.
-            {
-                const std::wstring exePath = electrobun::getModuleFileNameWide();
-                if (!exePath.empty()) {
-                    const std::filesystem::path buildJsonPath =
-                        std::filesystem::path(exePath).parent_path() /
-                        L".." / L"Resources" / L"build.json";
-                    const std::string buildJsonContent =
-                        electrobun::readFileToString(buildJsonPath);
-                    const electrobun::ChromiumFlagConfig chromiumFlags =
-                        electrobun::parseChromiumFlags(buildJsonContent);
-                    const auto remoteDebugging = electrobun::resolveRemoteDebugging(
-                        buildJsonContent, chromiumFlags,
-                        getenv(electrobun::kRemoteDebuggingPortEnvironment));
-                    const int selectedPort = electrobun::selectRemoteDebuggingPort(
-                        remoteDebugging, IsPortAvailable);
-                    g_remoteDebugPort = selectedPort;
-                    if (selectedPort != 0) {
-                        additionalBrowserArgs +=
-                            " --remote-debugging-port=" + std::to_string(selectedPort);
-                        std::cout << "[WebView2] Remote debugging enabled on 127.0.0.1:"
-                                  << selectedPort << " ("
-                                  << electrobun::remoteDebuggingSourceName(remoteDebugging.source)
-                                  << ")" << std::endl;
-                    }
-                }
+            // and pass it through the API so it survives elevation. Resolved once
+            // per process; see webView2RemoteDebuggingPort.
+            const int remoteDebugPort = webView2RemoteDebuggingPort();
+            if (remoteDebugPort != 0) {
+                additionalBrowserArgs +=
+                    " --remote-debugging-port=" + std::to_string(remoteDebugPort);
             }
 
             options->put_AdditionalBrowserArguments(
