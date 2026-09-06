@@ -7133,24 +7133,19 @@ static RECT initialWebView2Bounds(
     return bounds;
 }
 
-// Resolve the WebView2 remote-debugging port once per process.
+// Resolve the WebView2 remote-debugging port once per process, from the same
+// sources as CEF: build.json chromiumFlags, ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT,
+// or the dev-build default.
 //
-// This must not be resolved per view. WebView2 rejects a second environment
-// created against the same user data folder when its AdditionalBrowserArguments
-// differ, failing controller creation with ERROR_INVALID_STATE (0x8007139F),
-// and views share one user data folder unless they opt into a partition. A dev
-// build resolves its port by scanning for a free one, so a per-view resolve
-// would scan past the port the first view had already bound, pass different
-// arguments, and stop the second view from being created at all.
+// Not per view: WebView2 rejects a second environment on the same user data
+// folder when AdditionalBrowserArguments differ (ERROR_INVALID_STATE, 0x8007139F),
+// and dev builds scan for a free port, so resolving per view would scan past the
+// port view 1 already bound and break view 2.
 //
-// g_remoteDebugPort is deliberately not written here. It belongs to CEF, whose
-// OpenRemoteDevToolsFrontend reads it to reach the CEF DevTools endpoint;
-// overwriting it would aim that lookup at the WebView2 port in an app that
-// renders with both.
+// g_remoteDebugPort belongs to CEF (read by OpenRemoteDevToolsFrontend); a
+// WebView2 port must not overwrite it.
 static int webView2RemoteDebuggingPort() {
-    // Function-local static: initialized exactly once, thread-safely, when the
-    // first view is created.
-    static const int port = []() -> int {
+    static const int port = []() -> int {  // resolved once, thread-safely
         const std::wstring exePath = electrobun::getModuleFileNameWide();
         if (exePath.empty()) return 0;
 
@@ -7991,23 +7986,14 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
         try {
             auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
 
-            // Build the browser arguments dynamically so remote debugging can be
-            // folded in via the WebView2 API below. WebView2 Runtime 150 stopped
-            // honoring the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS environment variable
-            // for elevated (high-integrity) host processes, which silently breaks
-            // CDP/WebDriver automation (msedgedriver's --remote-debugging-port is
-            // dropped, so the DevTools endpoint never opens). Args passed through the
-            // API are still honored when elevated.
+            // Runtime 150 stopped honoring WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS for
+            // elevated hosts, silently breaking CDP automation. Args passed through
+            // the API are still honored, so build them here.
             // See https://github.com/MicrosoftEdge/WebView2Feedback/issues/5640.
             std::string additionalBrowserArgs =
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "
                 "--allow-insecure-localhost --disable-web-security";
 
-            // Resolve the remote-debugging port from the same sources as the CEF
-            // renderer (build.json chromiumFlags["remote-debugging-port"], the
-            // ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT env var, or the dev-build default)
-            // and pass it through the API so it survives elevation. Resolved once
-            // per process; see webView2RemoteDebuggingPort.
             const int remoteDebugPort = webView2RemoteDebuggingPort();
             if (remoteDebugPort != 0) {
                 additionalBrowserArgs +=
