@@ -7133,19 +7133,12 @@ static RECT initialWebView2Bounds(
     return bounds;
 }
 
-// Resolve the WebView2 remote-debugging port once per process, from the same
-// sources as CEF: build.json chromiumFlags, ELECTROBUN_CEF_REMOTE_DEBUGGING_PORT,
-// or the dev-build default.
-//
-// Not per view: WebView2 rejects a second environment on the same user data
-// folder when AdditionalBrowserArguments differ (ERROR_INVALID_STATE, 0x8007139F),
-// and dev builds scan for a free port, so resolving per view would scan past the
-// port view 1 already bound and break view 2.
-//
-// g_remoteDebugPort belongs to CEF (read by OpenRemoteDevToolsFrontend); a
-// WebView2 port must not overwrite it.
+// Resolved once per process, not per view: WebView2 rejects a second environment on
+// the same user data folder when AdditionalBrowserArguments differ (0x8007139F), and
+// the dev-build port scan would hand view 2 a different port than view 1 bound.
+// g_remoteDebugPort is left to CEF, which reads it in OpenRemoteDevToolsFrontend.
 static int webView2RemoteDebuggingPort() {
-    static const int port = []() -> int {  // resolved once, thread-safely
+    static const int port = []() -> int {
         const std::wstring exePath = electrobun::getModuleFileNameWide();
         if (exePath.empty()) return 0;
 
@@ -7987,9 +7980,8 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
             auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
 
             // Runtime 150 stopped honoring WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS for
-            // elevated hosts, silently breaking CDP automation. Args passed through
-            // the API are still honored, so build them here.
-            // See https://github.com/MicrosoftEdge/WebView2Feedback/issues/5640.
+            // elevated hosts, so the port has to go through the API instead.
+            // https://github.com/MicrosoftEdge/WebView2Feedback/issues/5640
             std::string additionalBrowserArgs =
                 "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "
                 "--allow-insecure-localhost --disable-web-security";
